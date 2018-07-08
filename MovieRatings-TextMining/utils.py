@@ -6,6 +6,7 @@ for natural language processing."""
 
 import re
 import string
+from operator import itemgetter
 import numpy as np
 import nltk
 from bs4 import BeautifulSoup
@@ -13,7 +14,6 @@ from nltk.corpus import stopwords
 from nltk.corpus import wordnet
 from nltk.stem.snowball import SnowballStemmer
 from nltk.stem.wordnet import WordNetLemmatizer
-
 
 # # nltk downloads
 # nltk.download('averaged_perceptron_tagger')
@@ -86,6 +86,30 @@ def rem_punctuation(text):
     return regex.sub(' ', text)
 
 
+def keep_string_printable(text):
+    """Removes chars not contained in string.printable from each string.
+
+    Args:
+        text (string): String which will be cleaned from punctuation.
+
+    Returns:
+        String without any unprintable chars.
+
+    """
+
+    printable = set(string.printable)
+    # filter returns iterable
+    return ''.join(filter(lambda x: x in printable, text))
+
+
+def replace_umlaute(text):
+    text = text.replace(u'ü', 'ue')
+    text = text.replace(u'ö', 'oe')
+    text = text.replace(u'ä', 'ae')
+    text = text.replace(u'ß', 'ss')
+    return text
+
+
 def rem_additional_whitespaces(text):
     """Removes additional and trailing whitespaces from text.
 
@@ -150,17 +174,22 @@ def lemmatize_words(token_list, language='english'):
 
 # Can be implemented in a more efficient way, e.g. less loops over the doc
 # by combining cleaning steps in one loop.
-def text_preprocess(text, stemming=True, html=True, concat=False):
+def text_preprocess(text, stemming=True, html=True,
+                    stop=True, language='english',
+                    umlaute=True, keep_printable=True, concat=False):
     """ Combination of different preprocessing steps for text mining.
     The steps are:
 
-    1.) remove html (optional)
-    2.) transform string to lowercase
-    3.) remove punctuation
-    4.) remove additional whitespaces
-    5.) tokenize sentence into list of tokens
-    6.) remove stopwords
-    7.) stem or lemmatize words. default: stemming
+    1.)  remove html (optional)
+    2.)  transform string to lowercase
+    3.)  remove punctuation
+    4.)  replace umlaute (optional)
+    5.)  keep printable characters (optional)
+    6.)  remove additional whitespaces
+    7.)  tokenize sentence into list of tokens
+    8.)  remove stopwords (optional)
+    9.)  stem or lemmatize words. default: stemming
+    10.) concat tokens (optional)
 
     Args:
         text (string): A sentence or a document.
@@ -175,13 +204,18 @@ def text_preprocess(text, stemming=True, html=True, concat=False):
         text = rem_html(text)
     text = text.lower()
     text = rem_punctuation(text)
+    if umlaute:
+        text = replace_umlaute(text)
+    if keep_printable:
+        text = keep_string_printable(text)
     text = rem_additional_whitespaces(text)
     text_list = nltk.word_tokenize(text)
-    if stemming:
-        text_list = stem_words(text_list)
+    if stemming or language != 'english':
+        text_list = stem_words(text_list, language)
     else:
         text_list = lemmatize_words(text_list)
-    text_list = rem_stop(text_list)
+    if stop:
+        text_list = rem_stop(text_list, language)
     if concat:
         return ' '.join(text_list)
     return text_list
@@ -207,6 +241,7 @@ def get_vocabulary(corpus, flatten=True):
         corpus (list): List of documents.
     Returns:
         Vocabulary dictionary and inverse dictionary.
+        The index corresponds to the order of wordcount frequency.
 
     """
 
@@ -214,9 +249,16 @@ def get_vocabulary(corpus, flatten=True):
         flat_list = flatten_list(corpus)
     else:
         flat_list = corpus
-    print(flat_list)
     token_set = set(flat_list)
-    word_to_index = {key: value for value, key in enumerate(token_set)}
+    vocab_size = len(token_set)
+    words, counts = wordcount_corpus(flat_list, flatten=False)
+    sorted_tuples = np.array(sorted(zip(words, counts),
+                                    key=itemgetter(1), reverse=True))
+    indices = np.arange(vocab_size) + 3
+    word_to_index = dict(zip(sorted_tuples[:, 0], indices))
+    word_to_index['<PAD>'] = 0
+    word_to_index['<START>'] = 1
+    word_to_index['<UNKNOWN>'] = 2
     index_to_word = {value: key for key, value in word_to_index.items()}
     return word_to_index, index_to_word
 
@@ -237,6 +279,47 @@ def wordcount_corpus(corpus, flatten=True):
         flat_list = corpus
     flat_array = np.array(flat_list)
     return np.unique(flat_array, return_counts=True)
+
+
+class CorpusEncoding():
+
+    def __init__(self):
+        self.word_to_index = None
+        self.index_to_word = None
+        self.vocab_size = None
+
+    def fit(self, tokenized_corpus):
+        self.word_to_index, self.vocab_size = get_vocabulary(tokenized_corpus,
+                                                             flatten=True)
+        self.vocab_size = len(self.word_to_index)
+
+    def reduce_vocab(self, lower_rank, upper_rank=None):
+        if not upper_rank:
+            upper_rank = 0
+        self.word_to_index = {k: v for k, v in self.word_to_index.items()
+                              if v <= lower_rank and v >= upper_rank}
+        self.index_to_word = {value: key for key, value
+                              in self.word_to_index.items()}
+
+    def transform(self, tokenized_corpus, drop_unknown=False):
+        encoded_tokenized_corpus = []
+        for doc in tokenized_corpus:
+            encoded_doc = [self.word_to_index[word]
+                           if word in self.word_to_index
+                           else 2 for word in doc]
+            encoded_doc.insert(0, 1)
+            if drop_unknown:
+                encoded_doc = [element for element in encoded_doc
+                               if element != 2]
+            encoded_tokenized_corpus.append(encoded_doc)
+        return encoded_tokenized_corpus
+
+    def inverse_transform(self, encoded_tokenized_corpus):
+        tokenized_corpus = []
+        for encoded_doc in encoded_tokenized_corpus:
+            decoded_doc = [self.index_to_word[index] for index in encoded_doc]
+            tokenized_corpus.append(decoded_doc)
+        return tokenized_corpus
 
 
 if __name__ == '__main__':
